@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { Users, BarChart3, Clock, Image, Loader2, RefreshCw, User, Medal, Search, X, ChevronLeft, Copy, Check } from 'lucide-react'
+import { Users, BarChart3, Clock, Image, Loader2, RefreshCw, User, Medal, Search, X, ChevronLeft, Copy, Check, Download } from 'lucide-react'
 import { Avatar } from '../components/Avatar'
 import ReactECharts from 'echarts-for-react'
 import DateRangePicker from '../components/DateRangePicker'
@@ -39,6 +39,7 @@ function GroupAnalyticsPage() {
   const [activeHours, setActiveHours] = useState<Record<number, number>>({})
   const [mediaStats, setMediaStats] = useState<{ typeCounts: Array<{ type: number; name: string; count: number }>; total: number } | null>(null)
   const [functionLoading, setFunctionLoading] = useState(false)
+  const [isExportingMembers, setIsExportingMembers] = useState(false)
 
   // 成员详情弹框
   const [selectedMember, setSelectedMember] = useState<GroupMember | null>(null)
@@ -181,6 +182,10 @@ function GroupAnalyticsPage() {
     return num.toLocaleString()
   }
 
+  const sanitizeFileName = (name: string) => {
+    return name.replace(/[<>:"/\\|?*]+/g, '_').trim()
+  }
+
   const getHourlyOption = () => {
     const hours = Array.from({ length: 24 }, (_, i) => i)
     const data = hours.map(h => activeHours[h] || 0)
@@ -250,6 +255,35 @@ function GroupAnalyticsPage() {
   const handleMemberClick = (member: GroupMember) => {
     setSelectedMember(member)
     setCopiedField(null)
+  }
+
+  const handleExportMembers = async () => {
+    if (!selectedGroup || isExportingMembers) return
+    setIsExportingMembers(true)
+    try {
+      const downloadsPath = await window.electronAPI.app.getDownloadsPath()
+      const baseName = sanitizeFileName(`${selectedGroup.displayName || selectedGroup.username}_群成员列表`)
+      const separator = downloadsPath && downloadsPath.includes('\\') ? '\\' : '/'
+      const defaultPath = downloadsPath ? `${downloadsPath}${separator}${baseName}.csv` : `${baseName}.csv`
+      const saveResult = await window.electronAPI.dialog.saveFile({
+        title: '导出群成员列表',
+        defaultPath,
+        filters: [{ name: 'CSV', extensions: ['csv'] }]
+      })
+      if (!saveResult || saveResult.canceled || !saveResult.filePath) return
+
+      const result = await window.electronAPI.groupAnalytics.exportGroupMembers(selectedGroup.username, saveResult.filePath)
+      if (result.success) {
+        alert(`导出成功，共 ${result.count ?? members.length} 人`)
+      } else {
+        alert(`导出失败：${result.error || '未知错误'}`)
+      }
+    } catch (e) {
+      console.error('导出群成员失败:', e)
+      alert(`导出失败：${String(e)}`)
+    } finally {
+      setIsExportingMembers(false)
+    }
   }
 
   const handleCopy = async (text: string, field: string) => {
@@ -422,6 +456,12 @@ function GroupAnalyticsPage() {
               onEndDateChange={setEndDate}
               onRangeComplete={handleDateRangeComplete}
             />
+          )}
+          {selectedFunction === 'members' && (
+            <button className="export-btn" onClick={handleExportMembers} disabled={functionLoading || isExportingMembers}>
+              {isExportingMembers ? <Loader2 size={16} className="spin" /> : <Download size={16} />}
+              <span>导出成员</span>
+            </button>
           )}
           <button className="refresh-btn" onClick={handleRefresh} disabled={functionLoading}>
             <RefreshCw size={16} className={functionLoading ? 'spin' : ''} />

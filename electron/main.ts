@@ -906,6 +906,10 @@ function registerIpcHandlers() {
     return groupAnalyticsService.getGroupMediaStats(chatroomId, startTime, endTime)
   })
 
+  ipcMain.handle('groupAnalytics:exportGroupMembers', async (_, chatroomId: string, outputPath: string) => {
+    return groupAnalyticsService.exportGroupMembers(chatroomId, outputPath)
+  })
+
   // 打开协议窗口
   ipcMain.handle('window:openAgreementWindow', async () => {
     createAgreementWindow()

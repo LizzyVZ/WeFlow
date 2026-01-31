@@ -232,6 +232,11 @@ export interface ElectronAPI {
       }
       error?: string
     }>
+    exportGroupMembers: (chatroomId: string, outputPath: string) => Promise<{
+      success: boolean
+      count?: number
+      error?: string
+    }>
   }
   annualReport: {
     getAvailableYears: () => Promise<{

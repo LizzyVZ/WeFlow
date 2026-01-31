@@ -1,3 +1,5 @@
+import * as fs from 'fs'
+import * as fs from 'fs'
 import { ConfigService } from './config'
 import { wcdbService } from './wcdbService'
 
@@ -41,6 +43,30 @@ class GroupAnalyticsService {
     this.configService = new ConfigService()
   }
 
+  // 并发控制：限制同时执行的 Promise 数量
+  private async parallelLimit<T, R>(
+    items: T[],
+    limit: number,
+    fn: (item: T, index: number) => Promise<R>
+  ): Promise<R[]> {
+    const results: R[] = new Array(items.length)
+    let currentIndex = 0
+
+    async function runNext(): Promise<void> {
+      while (currentIndex < items.length) {
+        const index = currentIndex++
+        results[index] = await fn(items[index], index)
+      }
+    }
+
+    const workers = Array(Math.min(limit, items.length))
+      .fill(null)
+      .map(() => runNext())
+
+    await Promise.all(workers)
+    return results
+  }
+
   private cleanAccountDirName(name: string): string {
     const trimmed = name.trim()
     if (!trimmed) return trimmed
@@ -63,6 +89,114 @@ class GroupAnalyticsService {
     const ok = await wcdbService.open(dbPath, decryptKey, cleanedWxid)
     if (!ok) return { success: false, error: 'WCDB 打开失败' }
     return { success: true }
+  }
+
+  private looksLikeHex(s: string): boolean {
+    if (s.length % 2 !== 0) return false
+    return /^[0-9a-fA-F]+$/.test(s)
+  }
+
+  private looksLikeBase64(s: string): boolean {
+    if (s.length % 4 !== 0) return false
+    return /^[A-Za-z0-9+/=]+$/.test(s)
+  }
+
+  /**
+   * 解析 ext_buffer 二进制数据，提取群成员的群昵称
+   */
+  private parseGroupNicknamesFromExtBuffer(buffer: Buffer): Map<string, string> {
+    const nicknameMap = new Map<string, string>()
+
+    try {
+      const raw = buffer.toString('utf8')
+      const wxidPattern = /wxid_[a-z0-9_]+/gi
+      const wxids = raw.match(wxidPattern) || []
+
+      for (const wxid of wxids) {
+        const wxidLower = wxid.toLowerCase()
+        const wxidIndex = raw.toLowerCase().indexOf(wxidLower)
+        if (wxidIndex === -1) continue
+
+        const afterWxid = raw.slice(wxidIndex + wxid.length)
+        let nickname = ''
+        let foundStart = false
+
+        for (let i = 0; i < afterWxid.length && i < 100; i++) {
+          const char = afterWxid[i]
+          const code = char.charCodeAt(0)
+          const isPrintable = (
+            (code >= 0x4E00 && code <= 0x9FFF) ||
+            (code >= 0x3000 && code <= 0x303F) ||
+            (code >= 0xFF00 && code <= 0xFFEF) ||
+            (code >= 0x20 && code <= 0x7E)
+          )
+
+          if (isPrintable && code !== 0x01 && code !== 0x18) {
+            foundStart = true
+            nickname += char
+          } else if (foundStart) {
+            break
+          }
+        }
+
+        nickname = nickname.trim().replace(/[\x00-\x1F\x7F]/g, '')
+        if (nickname && nickname.length < 50) {
+          nicknameMap.set(wxidLower, nickname)
+        }
+      }
+    } catch (e) {
+      console.error('Failed to parse ext_buffer:', e)
+    }
+
+    return nicknameMap
+  }
+
+  /**
+   * 从 contact.db 的 chat_room 表获取群成员的群昵称
+   */
+  private async getGroupNicknamesForRoom(chatroomId: string): Promise<Map<string, string>> {
+    try {
+      const sql = `SELECT ext_buffer FROM chat_room WHERE username = '${chatroomId.replace(/'/g, "''")}'`
+      const result = await wcdbService.execQuery('contact', null, sql)
+
+      if (!result.success || !result.rows || result.rows.length === 0) {
+        return new Map<string, string>()
+      }
+
+      let extBuffer = result.rows[0].ext_buffer
+
+      if (typeof extBuffer === 'string') {
+        if (this.looksLikeHex(extBuffer)) {
+          extBuffer = Buffer.from(extBuffer, 'hex')
+        } else if (this.looksLikeBase64(extBuffer)) {
+          extBuffer = Buffer.from(extBuffer, 'base64')
+        } else {
+          try {
+            extBuffer = Buffer.from(extBuffer, 'hex')
+          } catch {
+            extBuffer = Buffer.from(extBuffer, 'base64')
+          }
+        }
+      }
+
+      if (!extBuffer || !Buffer.isBuffer(extBuffer)) {
+        return new Map<string, string>()
+      }
+
+      return this.parseGroupNicknamesFromExtBuffer(extBuffer)
+    } catch (e) {
+      console.error('getGroupNicknamesForRoom error:', e)
+      return new Map<string, string>()
+    }
+  }
+
+  private escapeCsvValue(value: string): string {
+    if (value == null) return ''
+    const str = String(value)
+    if (/[",\n\r]/.test(str)) {
+      return `"${str.replace(/"/g, '""')}"`
+    }
+    return str
   }
 
   async getGroupChats(): Promise<{ success: boolean; data?: GroupChatInfo[]; error?: string }> {
@@ -244,6 +378,68 @@ class GroupAnalyticsService {
       const total = mediaCounts.reduce((sum, item) => sum + item.count, 0)
 
       return { success: true, data: { typeCounts: mediaCounts, total } }
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
+  }
+
+  async exportGroupMembers(chatroomId: string, outputPath: string): Promise<{ success: boolean; count?: number; error?: string }> {
+    try {
+      const conn = await this.ensureConnected()
+      if (!conn.success) return { success: false, error: conn.error }
+
+      const membersResult = await wcdbService.getGroupMembers(chatroomId)
+      if (!membersResult.success || !membersResult.members) {
+        return { success: false, error: membersResult.error || '获取群成员失败' }
+      }
+
+      const members = membersResult.members as { username: string; avatarUrl?: string }[]
+      if (members.length === 0) {
+        return { success: false, error: '群成员为空' }
+      }
+
+      const usernames = members.map((m) => m.username).filter(Boolean)
+      const [displayNames, groupNicknames] = await Promise.all([
+        wcdbService.getDisplayNames(usernames),
+        this.getGroupNicknamesForRoom(chatroomId)
+      ])
+
+      const contactMap = new Map<string, { remark?: string; nickName?: string; alias?: string }>()
+      const concurrency = 6
+      await this.parallelLimit(usernames, concurrency, async (username) => {
+        const result = await wcdbService.getContact(username)
+        if (result.success && result.contact) {
+          const contact = result.contact as any
+          contactMap.set(username, {
+            remark: contact.remark || '',
+            nickName: contact.nickName || contact.nick_name || '',
+            alias: contact.alias || ''
+          })
+        } else {
+          contactMap.set(username, { remark: '', nickName: '', alias: '' })
+        }
+      })
+
+      const header = ['微信昵称', '微信备注', '群昵称', 'wxid', '微信号']
+      const rows: string[][] = [header]
+
+      for (const member of members) {
+        const wxid = member.username
+        const contact = contactMap.get(wxid)
+        const fallbackName = displayNames.success && displayNames.map ? (displayNames.map[wxid] || '') : ''
+        const nickName = contact?.nickName || fallbackName || ''
+        const remark = contact?.remark || ''
+        const groupNickname = groupNicknames.get(wxid.toLowerCase()) || ''
+        const alias = contact?.alias || ''
+
+        rows.push([nickName, remark, groupNickname, wxid, alias])
+      }
+
+      const csvLines = rows.map((row) => row.map((cell) => this.escapeCsvValue(cell)).join(','))
+      const content = '\ufeff' + csvLines.join('\n')
+      fs.writeFileSync(outputPath, content, 'utf8')
+
+      return { success: true, count: members.length }
     } catch (e) {
       return { success: false, error: String(e) }
     }

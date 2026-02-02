@@ -1613,33 +1613,10 @@ class ExportService {
     const result = new Map<string, string>()
     if (members.length === 0) return result
 
+    // 直接使用 URL，不转换为 base64（与 ciphertalk 保持一致）
     for (const member of members) {
-      const fileInfo = this.resolveAvatarFile(member.avatarUrl)
-      if (!fileInfo) continue
-      try {
-        let data: Buffer | null = null
-        let mime = fileInfo.mime
-        if (fileInfo.data) {
-          data = fileInfo.data
-        } else if (fileInfo.sourcePath && fs.existsSync(fileInfo.sourcePath)) {
-          data = await fs.promises.readFile(fileInfo.sourcePath)
-        } else if (fileInfo.sourceUrl) {
-          const downloaded = await this.downloadToBuffer(fileInfo.sourceUrl)
-          if (downloaded) {
-            data = downloaded.data
-            mime = downloaded.mime || mime
-          }
-        }
-        if (!data) continue
-
-        // 优先使用内容检测出的 MIME 类型
-        const detectedMime = this.detectMimeType(data)
-        const finalMime = detectedMime || mime || this.inferImageMime(fileInfo.ext)
-
-        const base64 = data.toString('base64')
-        result.set(member.username, `data:${finalMime};base64,${base64}`)
-      } catch {
-        continue
+      if (member.avatarUrl) {
+        result.set(member.username, member.avatarUrl)
       }
     }
 

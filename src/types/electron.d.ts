@@ -477,7 +477,7 @@ export interface ElectronAPI {
       error?: string
     }>
     debugResource: (url: string) => Promise<{ success: boolean; status?: number; headers?: any; error?: string }>
-    proxyImage: (url: string) => Promise<{ success: boolean; dataUrl?: string; error?: string }>
+    proxyImage: (payload: { url: string; key?: string | number }) => Promise<{ success: boolean; dataUrl?: string; error?: string }>
   }
   llama: {
     loadModel: (modelPath: string) => Promise<boolean>

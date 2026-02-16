@@ -34,31 +34,51 @@ interface SnsPost {
     rawXml?: string  // 原始 XML 数据
 }
 
-const MediaItem = ({ media, onPreview }: { media: any, onPreview: () => void }) => {
-    const [error, setError] = useState(false);
-    const { url, thumb, livePhoto } = media;
-    const isLive = !!livePhoto;
-    const targetUrl = thumb || url;
+const MediaItem = ({ media, onPreview }: { media: any; onPreview: (src: string) => void }) => {
+    const [error, setError] = useState(false)
+    const [resolvedSrc, setResolvedSrc] = useState<string>('')
+    const { url, thumb, livePhoto } = media
+    const isLive = !!livePhoto
+    const targetUrl = thumb || url
 
-    const handleDownload = (e: React.MouseEvent) => {
-        e.stopPropagation();
+    useEffect(() => {
+        let cancelled = false
+        setError(false)
+        setResolvedSrc('')
 
-        let downloadUrl = url;
-        let downloadKey = media.key || '';
-
-        if (isLive && media.livePhoto) {
-            downloadUrl = media.livePhoto.url;
-            downloadKey = media.livePhoto.key || '';
+        const run = async () => {
+            try {
+                const result = await window.electronAPI.sns.proxyImage({
+                    url: targetUrl,
+                    key: media.key
+                })
+                if (cancelled) return
+                if (result.success && result.dataUrl) {
+                    setResolvedSrc(result.dataUrl)
+                } else {
+                    setResolvedSrc(targetUrl)
+                }
+            } catch {
+                if (!cancelled) setResolvedSrc(targetUrl)
+            }
         }
 
-        // TODO: 调用后端下载服务
-        // window.electronAPI.sns.download(downloadUrl, downloadKey);
-    };
+        run()
+        return () => { cancelled = true }
+    }, [targetUrl, media.key])
+
+    const handleDownload = (e: React.MouseEvent) => {
+        e.stopPropagation()
+        // TODO: call backend download service
+    }
+
+    const displaySrc = resolvedSrc || targetUrl
+    const previewSrc = resolvedSrc || url || targetUrl
 
     return (
-        <div className={`media-item ${error ? 'error' : ''}`} onClick={onPreview}>
+        <div className={`media-item ${error ? 'error' : ''}`} onClick={() => onPreview(previewSrc)}>
             <img
-                src={targetUrl}
+                src={displaySrc}
                 alt=""
                 referrerPolicy="no-referrer"
                 loading="lazy"
@@ -69,12 +89,12 @@ const MediaItem = ({ media, onPreview }: { media: any, onPreview: () => void }) 
                     <LivePhotoIcon size={16} className="live-icon" />
                 </div>
             )}
-            <button className="download-btn-overlay" onClick={handleDownload} title="下载原图">
+            <button className="download-btn-overlay" onClick={handleDownload} title="Download original">
                 <Download size={14} />
             </button>
         </div>
-    );
-};
+    )
+}
 
 interface Contact {
     username: string
@@ -471,7 +491,7 @@ export default function SnsPage() {
                                                         ) : post.media.length > 0 && (
                                                             <div className={`post-media-grid media-count-${Math.min(post.media.length, 9)}`}>
                                                                 {post.media.map((m, idx) => (
-                                                                    <MediaItem key={idx} media={m} onPreview={() => setPreviewImage(m.url)} />
+                                                                    <MediaItem key={idx} media={m} onPreview={(src) => setPreviewImage(src)} />
                                                                 ))}
                                                             </div>
                                                         )}

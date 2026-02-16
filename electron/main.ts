@@ -932,8 +932,10 @@ function registerIpcHandlers() {
     return snsService.debugResource(url)
   })
 
-  ipcMain.handle('sns:proxyImage', async (_, url: string) => {
-    return snsService.proxyImage(url)
+  ipcMain.handle('sns:proxyImage', async (_, payload: string | { url: string; key?: string | number }) => {
+    const url = typeof payload === 'string' ? payload : payload?.url
+    const key = typeof payload === 'string' ? undefined : payload?.key
+    return snsService.proxyImage(url, key)
   })
 
   // 私聊克隆

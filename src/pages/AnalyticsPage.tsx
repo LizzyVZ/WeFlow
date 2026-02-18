@@ -146,6 +146,17 @@ function AnalyticsPage() {
     })
   }
 
+  const toggleInvertSelection = () => {
+    setDraftExcluded((prev) => {
+      const allUsernames = new Set(excludeCandidates.map(c => normalizeUsername(c.username)))
+      const inverted = new Set<string>()
+      for (const u of allUsernames) {
+        if (!prev.has(u)) inverted.add(u)
+      }
+      return inverted
+    })
+  }
+
   const handleApplyExcluded = async () => {
     const payload = Array.from(draftExcluded)
     setIsExcludeDialogOpen(false)
@@ -493,7 +504,12 @@ function AnalyticsPage() {
               )}
             </div>
             <div className="exclude-modal-footer">
-              <span className="exclude-count">已排除 {draftExcluded.size} 人</span>
+              <div className="exclude-footer-left">
+                <span className="exclude-count">已排除 {draftExcluded.size} 人</span>
+                <button className="btn btn-text" onClick={toggleInvertSelection} disabled={excludeLoading}>
+                  反选
+                </button>
+              </div>
               <div className="exclude-actions">
                 <button className="btn btn-secondary" onClick={() => setIsExcludeDialogOpen(false)}>
                   取消

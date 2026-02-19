@@ -511,12 +511,15 @@ export interface ElectronAPI {
 }
 
 export interface ExportOptions {
-  format: 'chatlab' | 'chatlab-jsonl' | 'json' | 'html' | 'txt' | 'excel' | 'sql'
+  format: 'chatlab' | 'chatlab-jsonl' | 'json' | 'html' | 'txt' | 'excel' | 'weclone' | 'sql'
   dateRange?: { start: number; end: number } | null
+  senderUsername?: string
+  fileNameSuffix?: string
   exportMedia?: boolean
   exportAvatars?: boolean
   exportImages?: boolean
   exportVoices?: boolean
+  exportVideos?: boolean
   exportEmojis?: boolean
   exportVoiceAsText?: boolean
   excelCompactColumns?: boolean

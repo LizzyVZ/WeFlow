@@ -46,6 +46,12 @@ const LINK_XML_URL_TAGS = ['url', 'shorturl', 'weburl', 'webpageurl', 'jumpurl']
 const LINK_XML_TITLE_TAGS = ['title', 'linktitle', 'webtitle']
 const MEDIA_HOST_HINTS = ['mmsns.qpic.cn', 'vweixinthumb', 'snstimeline', 'snsvideodownload']
 
+const isSnsVideoUrl = (url?: string): boolean => {
+    if (!url) return false
+    const lower = url.toLowerCase()
+    return (lower.includes('snsvideodownload') || lower.includes('.mp4') || lower.includes('video')) && !lower.includes('vweixinthumb')
+}
+
 const decodeHtmlEntities = (text: string): string => {
     if (!text) return ''
     return text
@@ -95,6 +101,9 @@ const isLikelyMediaAssetUrl = (url: string): boolean => {
 }
 
 const buildLinkCardData = (post: SnsPost): SnsLinkCardData | null => {
+    const hasVideoMedia = post.type === 15 || post.media.some((item) => isSnsVideoUrl(item.url))
+    if (hasVideoMedia) return null
+
     const mediaValues = post.media
         .flatMap((item) => [item.url, item.thumb])
         .filter((value): value is string => Boolean(value))
@@ -201,7 +210,7 @@ const MediaItem = ({ media, onPreview }: { media: any; onPreview: (src: string, 
     const targetUrl = thumb || url // 默认显示缩略图
 
     // 判断是否为视频
-    const isVideo = url && (url.includes('snsvideodownload') || url.includes('.mp4') || url.includes('video')) && !url.includes('vweixinthumb')
+    const isVideo = isSnsVideoUrl(url)
 
     useEffect(() => {
         let cancelled = false
@@ -764,7 +773,8 @@ export default function SnsPage() {
                                 )}
                                 {posts.map((post) => {
                                     const linkCard = buildLinkCardData(post)
-                                    const showLinkCard = Boolean(linkCard) && post.media.length <= 1
+                                    const hasVideoMedia = post.type === 15 || post.media.some((item) => isSnsVideoUrl(item.url))
+                                    const showLinkCard = Boolean(linkCard) && post.media.length <= 1 && !hasVideoMedia
                                     const showMediaGrid = post.media.length > 0 && !showLinkCard
                                     return (
                                         <div key={post.id} className="sns-post-row">

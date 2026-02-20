@@ -983,6 +983,26 @@ function registerIpcHandlers() {
     }
   })
 
+  ipcMain.handle('sns:exportTimeline', async (event, options: any) => {
+    return snsService.exportTimeline(options, (progress) => {
+      if (!event.sender.isDestroyed()) {
+        event.sender.send('sns:exportProgress', progress)
+      }
+    })
+  })
+
+  ipcMain.handle('sns:selectExportDir', async () => {
+    const { dialog } = await import('electron')
+    const result = await dialog.showOpenDialog({
+      properties: ['openDirectory', 'createDirectory'],
+      title: '选择导出目录'
+    })
+    if (result.canceled || !result.filePaths?.[0]) {
+      return { canceled: true }
+    }
+    return { canceled: false, filePath: result.filePaths[0] }
+  })
+
   // 私聊克隆
 
 

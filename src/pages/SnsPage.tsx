@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
-import { RefreshCw, Search, X, Download, FolderOpen } from 'lucide-react'
+import { RefreshCw, Search, X, Download, FolderOpen, FileJson, FileText, Image, CheckCircle, AlertCircle, Calendar, Users, Info, ChevronLeft, ChevronRight } from 'lucide-react'
 import { ImagePreview } from '../components/ImagePreview'
 import JumpToDateDialog from '../components/JumpToDateDialog'
 import './SnsPage.scss'
@@ -33,6 +33,18 @@ export default function SnsPage() {
     const [showJumpDialog, setShowJumpDialog] = useState(false)
     const [previewImage, setPreviewImage] = useState<{ src: string, isVideo?: boolean, liveVideoPath?: string } | null>(null)
     const [debugPost, setDebugPost] = useState<SnsPost | null>(null)
+
+    // 导出相关状态
+    const [showExportDialog, setShowExportDialog] = useState(false)
+    const [exportFormat, setExportFormat] = useState<'json' | 'html'>('html')
+    const [exportFolder, setExportFolder] = useState('')
+    const [exportMedia, setExportMedia] = useState(false)
+    const [exportDateRange, setExportDateRange] = useState<{ start: string; end: string }>({ start: '', end: '' })
+    const [isExporting, setIsExporting] = useState(false)
+    const [exportProgress, setExportProgress] = useState<{ current: number; total: number; status: string } | null>(null)
+    const [exportResult, setExportResult] = useState<{ success: boolean; filePath?: string; postCount?: number; mediaCount?: number; error?: string } | null>(null)
+    const [refreshSpin, setRefreshSpin] = useState(false)
+    const [calendarPicker, setCalendarPicker] = useState<{ field: 'start' | 'end'; month: Date } | null>(null)
 
     const postsContainerRef = useRef<HTMLDivElement>(null)
     const [hasNewer, setHasNewer] = useState(false)
@@ -257,12 +269,28 @@ export default function SnsPage() {
                         <h2>朋友圈</h2>
                         <div className="header-actions">
                             <button
-                                onClick={() => loadPosts({ reset: true })}
+                                onClick={() => {
+                                    setExportResult(null)
+                                    setExportProgress(null)
+                                    setExportDateRange({ start: '', end: '' })
+                                    setShowExportDialog(true)
+                                }}
+                                className="icon-btn export-btn"
+                                title="导出朋友圈"
+                            >
+                                <Download size={20} />
+                            </button>
+                            <button
+                                onClick={() => {
+                                    setRefreshSpin(true)
+                                    loadPosts({ reset: true })
+                                    setTimeout(() => setRefreshSpin(false), 800)
+                                }}
                                 disabled={loading || loadingNewer}
                                 className="icon-btn refresh-btn"
                                 title="从头刷新"
                             >
-                                <RefreshCw size={20} className={(loading || loadingNewer) ? 'spinning' : ''} />
+                                <RefreshCw size={20} className={(loading || loadingNewer || refreshSpin) ? 'spinning' : ''} />
                             </button>
                         </div>
                     </div>
@@ -291,10 +319,21 @@ export default function SnsPage() {
                         ))}
                     </div>
 
-                    {loading && <div className="status-indicator loading-more">
-                        <RefreshCw size={16} className="spinning" />
-                        <span>正在加载更多...</span>
-                    </div>}
+                    {loading && posts.length === 0 && (
+                        <div className="initial-loading">
+                            <div className="loading-pulse">
+                                <div className="pulse-circle"></div>
+                                <span>正在加载朋友圈...</span>
+                            </div>
+                        </div>
+                    )}
+
+                    {loading && posts.length > 0 && (
+                        <div className="status-indicator loading-more">
+                            <RefreshCw size={16} className="spinning" />
+                            <span>正在加载更多...</span>
+                        </div>
+                    )}
 
                     {!hasMore && posts.length > 0 && (
                         <div className="status-indicator no-more">已经到底啦</div>
@@ -363,6 +402,338 @@ export default function SnsPage() {
                             <pre className="json-code">
                                 {JSON.stringify(debugPost, null, 2)}
                             </pre>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* 导出对话框 */}
+            {showExportDialog && (
+                <div className="modal-overlay" onClick={() => !isExporting && setShowExportDialog(false)}>
+                    <div className="export-dialog" onClick={(e) => e.stopPropagation()}>
+                        <div className="export-dialog-header">
+                            <h3>导出朋友圈</h3>
+                            <button className="close-btn" onClick={() => !isExporting && setShowExportDialog(false)} disabled={isExporting}>
+                                <X size={20} />
+                            </button>
+                        </div>
+
+                        <div className="export-dialog-body">
+                            {/* 筛选条件提示 */}
+                            {(selectedUsernames.length > 0 || searchKeyword) && (
+                                <div className="export-filter-info">
+                                    <span className="filter-badge">筛选导出</span>
+                                    {searchKeyword && <span className="filter-tag">关键词: "{searchKeyword}"</span>}
+                                    {selectedUsernames.length > 0 && (
+                                        <span className="filter-tag">
+                                            <Users size={12} />
+                                            {selectedUsernames.length} 个联系人
+                                            <span className="sync-hint">（同步自侧栏筛选）</span>
+                                        </span>
+                                    )}
+                                </div>
+                            )}
+
+                            {!exportResult ? (
+                                <>
+                                    {/* 格式选择 */}
+                                    <div className="export-section">
+                                        <label className="export-label">导出格式</label>
+                                        <div className="export-format-options">
+                                            <button
+                                                className={`format-option ${exportFormat === 'html' ? 'active' : ''}`}
+                                                onClick={() => setExportFormat('html')}
+                                                disabled={isExporting}
+                                            >
+                                                <FileText size={20} />
+                                                <span>HTML</span>
+                                                <small>浏览器可直接查看</small>
+                                            </button>
+                                            <button
+                                                className={`format-option ${exportFormat === 'json' ? 'active' : ''}`}
+                                                onClick={() => setExportFormat('json')}
+                                                disabled={isExporting}
+                                            >
+                                                <FileJson size={20} />
+                                                <span>JSON</span>
+                                                <small>结构化数据</small>
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    {/* 输出路径 */}
+                                    <div className="export-section">
+                                        <label className="export-label">输出目录</label>
+                                        <div className="export-path-row">
+                                            <input
+                                                type="text"
+                                                value={exportFolder}
+                                                readOnly
+                                                placeholder="点击选择输出目录..."
+                                                className="export-path-input"
+                                            />
+                                            <button
+                                                className="export-browse-btn"
+                                                onClick={async () => {
+                                                    const result = await window.electronAPI.sns.selectExportDir()
+                                                    if (!result.canceled && result.filePath) {
+                                                        setExportFolder(result.filePath)
+                                                    }
+                                                }}
+                                                disabled={isExporting}
+                                            >
+                                                <FolderOpen size={16} />
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    {/* 时间范围 */}
+                                    <div className="export-section">
+                                        <label className="export-label"><Calendar size={14} /> 时间范围（可选）</label>
+                                        <div className="export-date-row">
+                                            <div className="date-picker-trigger" onClick={() => {
+                                                if (!isExporting) setCalendarPicker(prev => prev?.field === 'start' ? null : { field: 'start', month: exportDateRange.start ? new Date(exportDateRange.start) : new Date() })
+                                            }}>
+                                                <Calendar size={14} />
+                                                <span className={exportDateRange.start ? '' : 'placeholder'}>
+                                                    {exportDateRange.start || '开始日期'}
+                                                </span>
+                                                {exportDateRange.start && (
+                                                    <X size={12} className="clear-date" onClick={(e) => { e.stopPropagation(); setExportDateRange(prev => ({ ...prev, start: '' })) }} />
+                                                )}
+                                            </div>
+                                            <span className="date-separator">至</span>
+                                            <div className="date-picker-trigger" onClick={() => {
+                                                if (!isExporting) setCalendarPicker(prev => prev?.field === 'end' ? null : { field: 'end', month: exportDateRange.end ? new Date(exportDateRange.end) : new Date() })
+                                            }}>
+                                                <Calendar size={14} />
+                                                <span className={exportDateRange.end ? '' : 'placeholder'}>
+                                                    {exportDateRange.end || '结束日期'}
+                                                </span>
+                                                {exportDateRange.end && (
+                                                    <X size={12} className="clear-date" onClick={(e) => { e.stopPropagation(); setExportDateRange(prev => ({ ...prev, end: '' })) }} />
+                                                )}
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* 媒体导出 */}
+                                    <div className="export-section">
+                                        <div className="export-toggle-row">
+                                            <div className="toggle-label">
+                                                <Image size={16} />
+                                                <span>导出媒体文件（图片/视频）</span>
+                                            </div>
+                                            <button
+                                                className={`toggle-switch${exportMedia ? ' active' : ''}`}
+                                                onClick={() => !isExporting && setExportMedia(!exportMedia)}
+                                                disabled={isExporting}
+                                            >
+                                                <span className="toggle-knob" />
+                                            </button>
+                                        </div>
+                                        {exportMedia && (
+                                            <p className="export-media-hint">媒体文件将保存到输出目录的 media 子目录中，可能需要较长时间</p>
+                                        )}
+                                    </div>
+
+                                    {/* 同步提示 */}
+                                    <div className="export-sync-hint">
+                                        <Info size={14} />
+                                        <span>将同步主页面的联系人范围筛选及关键词搜索</span>
+                                    </div>
+
+                                    {/* 进度条 */}
+                                    {isExporting && exportProgress && (
+                                        <div className="export-progress">
+                                            <div className="export-progress-bar">
+                                                <div
+                                                    className="export-progress-fill"
+                                                    style={{ width: exportProgress.total > 0 ? `${Math.round((exportProgress.current / exportProgress.total) * 100)}%` : '100%' }}
+                                                />
+                                            </div>
+                                            <span className="export-progress-text">{exportProgress.status}</span>
+                                        </div>
+                                    )}
+
+                                    {/* 操作按钮 */}
+                                    <div className="export-actions">
+                                        <button
+                                            className="export-cancel-btn"
+                                            onClick={() => setShowExportDialog(false)}
+                                            disabled={isExporting}
+                                        >
+                                            取消
+                                        </button>
+                                        <button
+                                            className="export-start-btn"
+                                            disabled={!exportFolder || isExporting}
+                                            onClick={async () => {
+                                                setIsExporting(true)
+                                                setExportProgress({ current: 0, total: 0, status: '准备导出...' })
+                                                setExportResult(null)
+
+                                                // 监听进度
+                                                const removeProgress = window.electronAPI.sns.onExportProgress((progress: any) => {
+                                                    setExportProgress(progress)
+                                                })
+
+                                                try {
+                                                    const result = await window.electronAPI.sns.exportTimeline({
+                                                        outputDir: exportFolder,
+                                                        format: exportFormat,
+                                                        usernames: selectedUsernames.length > 0 ? selectedUsernames : undefined,
+                                                        keyword: searchKeyword || undefined,
+                                                        exportMedia,
+                                                        startTime: exportDateRange.start ? Math.floor(new Date(exportDateRange.start).getTime() / 1000) : undefined,
+                                                        endTime: exportDateRange.end ? Math.floor(new Date(exportDateRange.end + 'T23:59:59').getTime() / 1000) : undefined
+                                                    })
+                                                    setExportResult(result)
+                                                } catch (e: any) {
+                                                    setExportResult({ success: false, error: e.message || String(e) })
+                                                } finally {
+                                                    setIsExporting(false)
+                                                    removeProgress()
+                                                }
+                                            }}
+                                        >
+                                            {isExporting ? '导出中...' : '开始导出'}
+                                        </button>
+                                    </div>
+                                </>
+                            ) : (
+                                /* 导出结果 */
+                                <div className="export-result">
+                                    {exportResult.success ? (
+                                        <>
+                                            <div className="export-result-icon success">
+                                                <CheckCircle size={48} />
+                                            </div>
+                                            <h4>导出成功</h4>
+                                            <p>共导出 {exportResult.postCount} 条动态{exportResult.mediaCount ? `，${exportResult.mediaCount} 个媒体文件` : ''}</p>
+                                            <div className="export-result-actions">
+                                                <button
+                                                    className="export-open-btn"
+                                                    onClick={() => {
+                                                        if (exportFolder) {
+                                                            window.electronAPI.shell.openExternal(`file://${exportFolder}`)
+                                                        }
+                                                    }}
+                                                >
+                                                    <FolderOpen size={16} />
+                                                    打开目录
+                                                </button>
+                                                <button
+                                                    className="export-done-btn"
+                                                    onClick={() => setShowExportDialog(false)}
+                                                >
+                                                    完成
+                                                </button>
+                                            </div>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <div className="export-result-icon error">
+                                                <AlertCircle size={48} />
+                                            </div>
+                                            <h4>导出失败</h4>
+                                            <p className="error-text">{exportResult.error}</p>
+                                            <button
+                                                className="export-done-btn"
+                                                onClick={() => setExportResult(null)}
+                                            >
+                                                重试
+                                            </button>
+                                        </>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* 日期选择弹窗 */}
+            {calendarPicker && (
+                <div className="calendar-overlay" onClick={() => setCalendarPicker(null)}>
+                    <div className="calendar-modal" onClick={e => e.stopPropagation()}>
+                        <div className="calendar-header">
+                            <div className="title-area">
+                                <Calendar size={18} />
+                                <h3>选择{calendarPicker.field === 'start' ? '开始' : '结束'}日期</h3>
+                            </div>
+                            <button className="close-btn" onClick={() => setCalendarPicker(null)}>
+                                <X size={18} />
+                            </button>
+                        </div>
+                        <div className="calendar-view">
+                            <div className="calendar-nav">
+                                <button className="nav-btn" onClick={() => setCalendarPicker(prev => prev ? { ...prev, month: new Date(prev.month.getFullYear(), prev.month.getMonth() - 1, 1) } : null)}>
+                                    <ChevronLeft size={18} />
+                                </button>
+                                <span className="current-month">
+                                    {calendarPicker.month.getFullYear()}年{calendarPicker.month.getMonth() + 1}月
+                                </span>
+                                <button className="nav-btn" onClick={() => setCalendarPicker(prev => prev ? { ...prev, month: new Date(prev.month.getFullYear(), prev.month.getMonth() + 1, 1) } : null)}>
+                                    <ChevronRight size={18} />
+                                </button>
+                            </div>
+                            <div className="calendar-weekdays">
+                                {['日', '一', '二', '三', '四', '五', '六'].map(d => <div key={d} className="weekday">{d}</div>)}
+                            </div>
+                            <div className="calendar-days">
+                                {(() => {
+                                    const y = calendarPicker.month.getFullYear()
+                                    const m = calendarPicker.month.getMonth()
+                                    const firstDay = new Date(y, m, 1).getDay()
+                                    const daysInMonth = new Date(y, m + 1, 0).getDate()
+                                    const cells: (number | null)[] = []
+                                    for (let i = 0; i < firstDay; i++) cells.push(null)
+                                    for (let i = 1; i <= daysInMonth; i++) cells.push(i)
+                                    const today = new Date()
+                                    return cells.map((day, i) => {
+                                        if (day === null) return <div key={i} className="day-cell empty" />
+                                        const dateStr = `${y}-${String(m + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+                                        const isToday = day === today.getDate() && m === today.getMonth() && y === today.getFullYear()
+                                        const currentVal = calendarPicker.field === 'start' ? exportDateRange.start : exportDateRange.end
+                                        const isSelected = dateStr === currentVal
+                                        return (
+                                            <div
+                                                key={i}
+                                                className={`day-cell${isSelected ? ' selected' : ''}${isToday ? ' today' : ''}`}
+                                                onClick={() => {
+                                                    setExportDateRange(prev => ({ ...prev, [calendarPicker.field]: dateStr }))
+                                                    setCalendarPicker(null)
+                                                }}
+                                            >{day}</div>
+                                        )
+                                    })
+                                })()}
+                            </div>
+                        </div>
+                        <div className="quick-options">
+                            <button onClick={() => {
+                                if (calendarPicker.field === 'start') {
+                                    const d = new Date(); d.setMonth(d.getMonth() - 1)
+                                    setExportDateRange(prev => ({ ...prev, start: d.toISOString().split('T')[0] }))
+                                } else {
+                                    setExportDateRange(prev => ({ ...prev, end: new Date().toISOString().split('T')[0] }))
+                                }
+                                setCalendarPicker(null)
+                            }}>{calendarPicker.field === 'start' ? '一个月前' : '今天'}</button>
+                            <button onClick={() => {
+                                if (calendarPicker.field === 'start') {
+                                    const d = new Date(); d.setMonth(d.getMonth() - 3)
+                                    setExportDateRange(prev => ({ ...prev, start: d.toISOString().split('T')[0] }))
+                                } else {
+                                    const d = new Date(); d.setMonth(d.getMonth() - 1)
+                                    setExportDateRange(prev => ({ ...prev, end: d.toISOString().split('T')[0] }))
+                                }
+                                setCalendarPicker(null)
+                            }}>{calendarPicker.field === 'start' ? '三个月前' : '一个月前'}</button>
+                        </div>
+                        <div className="dialog-footer">
+                            <button className="cancel-btn" onClick={() => setCalendarPicker(null)}>取消</button>
                         </div>
                     </div>
                 </div>

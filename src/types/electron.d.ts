@@ -491,6 +491,18 @@ export interface ElectronAPI {
     }>
     debugResource: (url: string) => Promise<{ success: boolean; status?: number; headers?: any; error?: string }>
     proxyImage: (payload: { url: string; key?: string | number }) => Promise<{ success: boolean; dataUrl?: string; error?: string }>
+    downloadImage: (payload: { url: string; key?: string | number }) => Promise<{ success: boolean; data?: any; contentType?: string; error?: string }>
+    exportTimeline: (options: {
+      outputDir: string
+      format: 'json' | 'html'
+      usernames?: string[]
+      keyword?: string
+      exportMedia?: boolean
+      startTime?: number
+      endTime?: number
+    }) => Promise<{ success: boolean; filePath?: string; postCount?: number; mediaCount?: number; error?: string }>
+    onExportProgress: (callback: (payload: { current: number; total: number; status: string }) => void) => () => void
+    selectExportDir: () => Promise<{ canceled: boolean; filePath?: string }>
   }
   llama: {
     loadModel: (modelPath: string) => Promise<boolean>

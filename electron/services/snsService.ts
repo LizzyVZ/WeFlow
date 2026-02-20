@@ -38,6 +38,8 @@ export interface SnsPost {
     likes: string[]
     comments: { id: string; nickname: string; content: string; refCommentId: string; refNickname?: string }[]
     rawXml?: string
+    linkTitle?: string
+    linkUrl?: string
 }
 
 
@@ -266,6 +268,367 @@ class SnsService {
         return this.fetchAndDecryptImage(url, key)
     }
 
+    /**
+     * 导出朋友圈动态
+     * 支持筛选条件（用户名、关键词）和媒体文件导出
+     */
+    async exportTimeline(options: {
+        outputDir: string
+        format: 'json' | 'html'
+        usernames?: string[]
+        keyword?: string
+        exportMedia?: boolean
+        startTime?: number
+        endTime?: number
+    }, progressCallback?: (progress: { current: number; total: number; status: string }) => void): Promise<{ success: boolean; filePath?: string; postCount?: number; mediaCount?: number; error?: string }> {
+        const { outputDir, format, usernames, keyword, exportMedia = false, startTime, endTime } = options
+
+        try {
+            // 确保输出目录存在
+            if (!existsSync(outputDir)) {
+                mkdirSync(outputDir, { recursive: true })
+            }
+
+            // 1. 分页加载全部帖子
+            const allPosts: SnsPost[] = []
+            const pageSize = 50
+            let endTs: number | undefined = endTime  // 使用 endTime 作为分页起始上界
+            let hasMore = true
+
+            progressCallback?.({ current: 0, total: 0, status: '正在加载朋友圈数据...' })
+
+            while (hasMore) {
+                const result = await this.getTimeline(pageSize, 0, usernames, keyword, startTime, endTs)
+                if (result.success && result.timeline && result.timeline.length > 0) {
+                    allPosts.push(...result.timeline)
+                    // 下一页的 endTs 为当前最后一条帖子的时间 - 1
+                    const lastTs = result.timeline[result.timeline.length - 1].createTime - 1
+                    endTs = lastTs
+                    hasMore = result.timeline.length >= pageSize
+                    // 如果已经低于 startTime，提前终止
+                    if (startTime && lastTs < startTime) {
+                        hasMore = false
+                    }
+                    progressCallback?.({ current: allPosts.length, total: 0, status: `已加载 ${allPosts.length} 条动态...` })
+                } else {
+                    hasMore = false
+                }
+            }
+
+            if (allPosts.length === 0) {
+                return { success: true, filePath: '', postCount: 0, mediaCount: 0 }
+            }
+
+            progressCallback?.({ current: 0, total: allPosts.length, status: `共 ${allPosts.length} 条动态，准备导出...` })
+
+            // 2. 如果需要导出媒体，创建 media 子目录并下载
+            let mediaCount = 0
+            const mediaDir = join(outputDir, 'media')
+
+            if (exportMedia) {
+                if (!existsSync(mediaDir)) {
+                    mkdirSync(mediaDir, { recursive: true })
+                }
+
+                // 收集所有媒体下载任务
+                const mediaTasks: { media: SnsMedia; postId: string; mi: number }[] = []
+                for (const post of allPosts) {
+                    post.media.forEach((media, mi) => mediaTasks.push({ media, postId: post.id, mi }))
+                }
+
+                // 并发下载（5路）
+                let done = 0
+                const concurrency = 5
+                const runTask = async (task: typeof mediaTasks[0]) => {
+                    const { media, postId, mi } = task
+                    try {
+                        const isVideo = isVideoUrl(media.url)
+                        const ext = isVideo ? 'mp4' : 'jpg'
+                        const fileName = `${postId}_${mi}.${ext}`
+                        const filePath = join(mediaDir, fileName)
+
+                        if (existsSync(filePath)) {
+                            ;(media as any).localPath = `media/${fileName}`
+                            mediaCount++
+                        } else {
+                            const result = await this.fetchAndDecryptImage(media.url, media.key)
+                            if (result.success && result.data) {
+                                await writeFile(filePath, result.data)
+                                ;(media as any).localPath = `media/${fileName}`
+                                mediaCount++
+                            } else if (result.success && result.cachePath) {
+                                const cachedData = await readFile(result.cachePath)
+                                await writeFile(filePath, cachedData)
+                                ;(media as any).localPath = `media/${fileName}`
+                                mediaCount++
+                            }
+                        }
+                    } catch (e) {
+                        console.warn(`[SnsExport] 媒体下载失败: ${task.media.url}`, e)
+                    }
+                    done++
+                    progressCallback?.({ current: done, total: mediaTasks.length, status: `正在下载媒体 (${done}/${mediaTasks.length})...` })
+                }
+
+                // 控制并发的执行器
+                const queue = [...mediaTasks]
+                const workers = Array.from({ length: Math.min(concurrency, queue.length) }, async () => {
+                    while (queue.length > 0) {
+                        const task = queue.shift()!
+                        await runTask(task)
+                    }
+                })
+                await Promise.all(workers)
+            }
+
+            // 2.5 下载头像
+            const avatarMap = new Map<string, string>()
+            if (format === 'html') {
+                if (!existsSync(mediaDir)) mkdirSync(mediaDir, { recursive: true })
+                const uniqueUsers = [...new Map(allPosts.filter(p => p.avatarUrl).map(p => [p.username, p])).values()]
+                let avatarDone = 0
+                const avatarQueue = [...uniqueUsers]
+                const avatarWorkers = Array.from({ length: Math.min(5, avatarQueue.length) }, async () => {
+                    while (avatarQueue.length > 0) {
+                        const post = avatarQueue.shift()!
+                        try {
+                            const fileName = `avatar_${crypto.createHash('md5').update(post.username).digest('hex').slice(0, 8)}.jpg`
+                            const filePath = join(mediaDir, fileName)
+                            if (existsSync(filePath)) {
+                                avatarMap.set(post.username, `media/${fileName}`)
+                            } else {
+                                const result = await this.fetchAndDecryptImage(post.avatarUrl!)
+                                if (result.success && result.data) {
+                                    await writeFile(filePath, result.data)
+                                    avatarMap.set(post.username, `media/${fileName}`)
+                                }
+                            }
+                        } catch (e) { /* 头像下载失败不影响导出 */ }
+                        avatarDone++
+                        progressCallback?.({ current: avatarDone, total: uniqueUsers.length, status: `正在下载头像 (${avatarDone}/${uniqueUsers.length})...` })
+                    }
+                })
+                await Promise.all(avatarWorkers)
+            }
+
+            // 3. 生成输出文件
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+            let outputFilePath: string
+
+            if (format === 'json') {
+                outputFilePath = join(outputDir, `朋友圈导出_${timestamp}.json`)
+                const exportData = {
+                    exportTime: new Date().toISOString(),
+                    totalPosts: allPosts.length,
+                    filters: {
+                        usernames: usernames || [],
+                        keyword: keyword || ''
+                    },
+                    posts: allPosts.map(p => ({
+                        id: p.id,
+                        username: p.username,
+                        nickname: p.nickname,
+                        createTime: p.createTime,
+                        createTimeStr: new Date(p.createTime * 1000).toLocaleString('zh-CN'),
+                        contentDesc: p.contentDesc,
+                        type: p.type,
+                        media: p.media.map(m => ({
+                            url: m.url,
+                            thumb: m.thumb,
+                            localPath: (m as any).localPath || undefined
+                        })),
+                        likes: p.likes,
+                        comments: p.comments,
+                        linkTitle: (p as any).linkTitle,
+                        linkUrl: (p as any).linkUrl
+                    }))
+                }
+                await writeFile(outputFilePath, JSON.stringify(exportData, null, 2), 'utf-8')
+            } else {
+                // HTML 格式
+                outputFilePath = join(outputDir, `朋友圈导出_${timestamp}.html`)
+                const html = this.generateHtml(allPosts, { usernames, keyword }, avatarMap)
+                await writeFile(outputFilePath, html, 'utf-8')
+            }
+
+            progressCallback?.({ current: allPosts.length, total: allPosts.length, status: '导出完成！' })
+
+            return { success: true, filePath: outputFilePath, postCount: allPosts.length, mediaCount }
+        } catch (e: any) {
+            console.error('[SnsExport] 导出失败:', e)
+            return { success: false, error: e.message || String(e) }
+        }
+    }
+
+    /**
+     * 生成朋友圈 HTML 导出文件
+     */
+    private generateHtml(posts: SnsPost[], filters: { usernames?: string[]; keyword?: string }, avatarMap?: Map<string, string>): string {
+        const escapeHtml = (str: string) => str
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/\n/g, '<br>')
+
+        const formatTime = (ts: number) => {
+            const d = new Date(ts * 1000)
+            const now = new Date()
+            const isCurrentYear = d.getFullYear() === now.getFullYear()
+            const pad = (n: number) => String(n).padStart(2, '0')
+            const timeStr = `${pad(d.getHours())}:${pad(d.getMinutes())}`
+            const m = d.getMonth() + 1, day = d.getDate()
+            return isCurrentYear ? `${m}月${day}日 ${timeStr}` : `${d.getFullYear()}年${m}月${day}日 ${timeStr}`
+        }
+
+        // 生成头像首字母
+        const avatarLetter = (name: string) => {
+            const ch = name.charAt(0)
+            return escapeHtml(ch || '?')
+        }
+
+        let filterInfo = ''
+        if (filters.keyword) filterInfo += `关键词: "${escapeHtml(filters.keyword)}" `
+        if (filters.usernames && filters.usernames.length > 0) filterInfo += `筛选用户: ${filters.usernames.length} 人`
+
+        const postsHtml = posts.map(post => {
+            const mediaCount = post.media.length
+            const gridClass = mediaCount === 1 ? 'grid-1' : mediaCount === 2 || mediaCount === 4 ? 'grid-2' : 'grid-3'
+
+            const mediaHtml = post.media.map((m, mi) => {
+                const localPath = (m as any).localPath
+                if (localPath) {
+                    if (isVideoUrl(m.url)) {
+                        return `<div class="mi"><video src="${escapeHtml(localPath)}" controls preload="metadata"></video></div>`
+                    }
+                    return `<div class="mi"><img src="${escapeHtml(localPath)}" loading="lazy" onclick="openLb(this.src)" alt=""></div>`
+                }
+                return `<div class="mi ml"><a href="${escapeHtml(m.url)}" target="_blank">查看媒体</a></div>`
+            }).join('')
+
+            const linkHtml = post.linkTitle && post.linkUrl
+                ? `<a class="lk" href="${escapeHtml(post.linkUrl)}" target="_blank"><span class="lk-t">${escapeHtml(post.linkTitle)}</span><span class="lk-a">›</span></a>`
+                : ''
+
+            const likesHtml = post.likes.length > 0
+                ? `<div class="interactions"><div class="likes">♥ ${post.likes.map(l => `<span>${escapeHtml(l)}</span>`).join('、')}</div></div>`
+                : ''
+
+            const commentsHtml = post.comments.length > 0
+                ? `<div class="interactions${post.likes.length > 0 ? ' cmt-border' : ''}"><div class="cmts">${post.comments.map(c => {
+                    const ref = c.refNickname ? `<span class="re">回复</span><b>${escapeHtml(c.refNickname)}</b>` : ''
+                    return `<div class="cmt"><b>${escapeHtml(c.nickname)}</b>${ref}：${escapeHtml(c.content)}</div>`
+                }).join('')}</div></div>`
+                : ''
+
+            const avatarSrc = avatarMap?.get(post.username)
+            const avatarHtml = avatarSrc
+                ? `<div class="avatar"><img src="${escapeHtml(avatarSrc)}" alt=""></div>`
+                : `<div class="avatar">${avatarLetter(post.nickname)}</div>`
+
+            return `<div class="post">
+${avatarHtml}
+<div class="body">
+<div class="hd"><span class="nick">${escapeHtml(post.nickname)}</span><span class="tm">${formatTime(post.createTime)}</span></div>
+${post.contentDesc ? `<div class="txt">${escapeHtml(post.contentDesc)}</div>` : ''}
+${mediaHtml ? `<div class="mg ${gridClass}">${mediaHtml}</div>` : ''}
+${linkHtml}
+${likesHtml}
+${commentsHtml}
+</div></div>`
+        }).join('\n')
+
+        return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>朋友圈导出</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--t1);line-height:1.6;-webkit-font-smoothing:antialiased}
+:root{--bg:#F0EEE9;--card:rgba(255,255,255,.92);--t1:#3d3d3d;--t2:#666;--t3:#999;--accent:#8B7355;--border:rgba(0,0,0,.08);--bg3:rgba(0,0,0,.03)}
+@media(prefers-color-scheme:dark){:root{--bg:#1a1a1a;--card:rgba(40,40,40,.85);--t1:#e0e0e0;--t2:#aaa;--t3:#777;--accent:#c4a882;--border:rgba(255,255,255,.1);--bg3:rgba(255,255,255,.06)}}
+.container{max-width:800px;margin:0 auto;padding:20px 24px 60px}
+
+/* 页面标题 */
+.feed-hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;padding:0 4px}
+.feed-hd h2{font-size:20px;font-weight:700}
+.feed-hd .info{font-size:12px;color:var(--t3)}
+
+/* 帖子卡片 - 头像+内容双列 */
+.post{background:var(--card);border-radius:16px;border:1px solid var(--border);padding:20px;margin-bottom:24px;display:flex;gap:16px;box-shadow:0 2px 8px rgba(0,0,0,.02);transition:transform .2s,box-shadow .2s}
+.post:hover{transform:translateY(-2px);box-shadow:0 8px 16px rgba(0,0,0,.06)}
+.avatar{width:48px;height:48px;border-radius:12px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:600;flex-shrink:0;overflow:hidden}
+.avatar img{width:100%;height:100%;object-fit:cover}
+.body{flex:1;min-width:0}
+.hd{display:flex;flex-direction:column;margin-bottom:8px}
+.nick{font-size:15px;font-weight:700;color:var(--accent);margin-bottom:2px}
+.tm{font-size:12px;color:var(--t3)}
+.txt{font-size:15px;line-height:1.6;white-space:pre-wrap;word-break:break-word;margin-bottom:12px}
+
+/* 媒体网格 */
+.mg{display:grid;gap:6px;margin-bottom:12px;max-width:320px}
+.grid-1{max-width:300px}
+.grid-1 .mi{border-radius:12px}
+.grid-1 .mi img{aspect-ratio:auto;max-height:480px;object-fit:contain;background:var(--bg3)}
+.grid-2{grid-template-columns:1fr 1fr}
+.grid-3{grid-template-columns:1fr 1fr 1fr}
+.mi{overflow:hidden;border-radius:12px;background:var(--bg3);position:relative;aspect-ratio:1}
+.mi img{width:100%;height:100%;object-fit:cover;display:block;cursor:zoom-in;transition:opacity .2s}
+.mi img:hover{opacity:.9}
+.mi video{width:100%;height:100%;object-fit:cover;display:block;background:#000}
+.ml{display:flex;align-items:center;justify-content:center}
+.ml a{color:var(--accent);text-decoration:none;font-size:13px}
+
+/* 链接卡片 */
+.lk{display:flex;align-items:center;gap:10px;padding:10px;background:var(--bg3);border:1px solid var(--border);border-radius:12px;text-decoration:none;color:var(--t1);font-size:14px;margin-bottom:12px;transition:background .15s}
+.lk:hover{background:var(--border)}
+.lk-t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
+.lk-a{color:var(--t3);font-size:18px;flex-shrink:0}
+
+/* 互动区域 */
+.interactions{margin-top:12px;padding-top:12px;border-top:1px dashed var(--border);font-size:13px}
+.interactions.cmt-border{border-top:none;padding-top:0;margin-top:8px}
+.likes{color:var(--accent);font-weight:500;line-height:1.8}
+.cmts{background:var(--bg3);border-radius:8px;padding:8px 12px;line-height:1.4}
+.cmt{margin-bottom:4px;color:var(--t2)}
+.cmt:last-child{margin-bottom:0}
+.cmt b{color:var(--accent);font-weight:500}
+.re{color:var(--t3);margin:0 4px;font-size:12px}
+
+/* 灯箱 */
+.lb{display:none;position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:9999;align-items:center;justify-content:center;cursor:zoom-out}
+.lb.on{display:flex}
+.lb img{max-width:92vw;max-height:92vh;object-fit:contain;border-radius:4px}
+
+/* 回到顶部 */
+.btt{position:fixed;right:24px;bottom:32px;width:44px;height:44px;border-radius:50%;background:var(--card);box-shadow:0 2px 12px rgba(0,0,0,.12);border:1px solid var(--border);cursor:pointer;font-size:18px;display:none;align-items:center;justify-content:center;z-index:100;color:var(--t2)}
+.btt:hover{transform:scale(1.1)}
+.btt.show{display:flex}
+
+/* 页脚 */
+.ft{text-align:center;padding:32px 0 24px;font-size:12px;color:var(--t3)}
+</style>
+</head>
+<body>
+<div class="container">
+    <div class="feed-hd"><h2>朋友圈</h2><span class="info">共 ${posts.length} 条${filterInfo ? ` · ${filterInfo}` : ''}</span></div>
+    ${postsHtml}
+    <div class="ft">由 WeFlow 导出 · ${new Date().toLocaleString('zh-CN')}</div>
+</div>
+<div class="lb" id="lb" onclick="closeLb()"><img id="lbi" src=""></div>
+<button class="btt" id="btt" onclick="scrollTo({top:0,behavior:'smooth'})">↑</button>
+<script>
+function openLb(s){document.getElementById('lbi').src=s;document.getElementById('lb').classList.add('on');document.body.style.overflow='hidden'}
+function closeLb(){document.getElementById('lb').classList.remove('on');document.body.style.overflow=''}
+document.addEventListener('keydown',function(e){if(e.key==='Escape')closeLb()})
+window.addEventListener('scroll',function(){document.getElementById('btt').classList.toggle('show',window.scrollY>600)})
+</script>
+</body>
+</html>`
+    }
+
     private async fetchAndDecryptImage(url: string, key?: string | number): Promise<{ success: boolean; data?: Buffer; contentType?: string; cachePath?: string; error?: string }> {
         if (!url) return { success: false, error: 'url 不能为空' }
 
@@ -321,7 +684,6 @@ class SnsService {
                         }
 
                         res.pipe(fileStream)
-
                         fileStream.on('finish', async () => {
                             fileStream.close()
 
@@ -379,6 +741,12 @@ class SnsService {
                     req.on('error', (e: any) => {
                         fs.unlink(tmpPath, () => { })
                         resolve({ success: false, error: e.message })
+                    })
+
+                    req.setTimeout(15000, () => {
+                        req.destroy()
+                        fs.unlink(tmpPath, () => { })
+                        resolve({ success: false, error: '请求超时' })
                     })
 
                     req.end()
@@ -467,6 +835,10 @@ class SnsService {
                 })
 
                 req.on('error', (e: any) => resolve({ success: false, error: e.message }))
+                req.setTimeout(15000, () => {
+                    req.destroy()
+                    resolve({ success: false, error: '请求超时' })
+                })
                 req.end()
             } catch (e: any) {
                 resolve({ success: false, error: e.message })

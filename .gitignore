@@ -61,3 +61,4 @@ wcdb/
 chatlab-format.md
 *.bak
 AGENTS.md
+.claude/

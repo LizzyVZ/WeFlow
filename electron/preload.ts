@@ -278,7 +278,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('sns:getTimeline', limit, offset, usernames, keyword, startTime, endTime),
     debugResource: (url: string) => ipcRenderer.invoke('sns:debugResource', url),
     proxyImage: (payload: { url: string; key?: string | number }) => ipcRenderer.invoke('sns:proxyImage', payload),
-    downloadImage: (payload: { url: string; key?: string | number }) => ipcRenderer.invoke('sns:downloadImage', payload)
+    downloadImage: (payload: { url: string; key?: string | number }) => ipcRenderer.invoke('sns:downloadImage', payload),
+    exportTimeline: (options: any) => ipcRenderer.invoke('sns:exportTimeline', options),
+    onExportProgress: (callback: (payload: any) => void) => {
+      ipcRenderer.on('sns:exportProgress', (_, payload) => callback(payload))
+      return () => ipcRenderer.removeAllListeners('sns:exportProgress')
+    },
+    selectExportDir: () => ipcRenderer.invoke('sns:selectExportDir')
   },
 
   // Llama AI
